@@ -7,7 +7,7 @@ import (
 	"strings"
 )
 
-func handleConnection(conn net.Conn, store *KVStore) {
+func handleConnection(conn net.Conn, store *KVStore, wal *WAL) {
 	defer conn.Close()
 	scanner := bufio.NewScanner(conn)
 
@@ -27,6 +27,9 @@ func handleConnection(conn net.Conn, store *KVStore) {
 				conn.Write([]byte("ERROR: SET needs key and value\n"))
 				continue
 			}
+
+			wal.Write(line)
+
 			store.Set(parts[1], parts[2])
 			conn.Write([]byte("OK\n"))
 
@@ -47,6 +50,9 @@ func handleConnection(conn net.Conn, store *KVStore) {
 				conn.Write([]byte("ERROR: DELETE needs a key\n"))
 				continue
 			}
+
+			wal.Write(line)
+
 			store.Delete(parts[1])
 			conn.Write([]byte("OK\n"))
 
@@ -58,6 +64,18 @@ func handleConnection(conn net.Conn, store *KVStore) {
 
 func main() {
 	store := NewKVStore()
+
+	wal, err := NewWAL("wal.log")
+	if err != nil {
+		fmt.Println("WAL error:", err)
+		return
+	}
+
+	err = wal.Load(store)
+	if err != nil {
+		fmt.Println("WAL load error:", err)
+		return
+	}
 
 	listener, err := net.Listen("tcp", ":8080")
 	if err != nil {
@@ -74,6 +92,7 @@ func main() {
 			fmt.Println("connection error:", err)
 			continue
 		}
-		go handleConnection(conn, store)
+
+		go handleConnection(conn, store, wal)
 	}
 }
