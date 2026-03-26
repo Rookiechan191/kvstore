@@ -4,10 +4,23 @@ import (
 	"bufio"
 	"fmt"
 	"net"
+	"os"
 	"strings"
 )
 
-func handleConnection(conn net.Conn, store *KVStore, wal *WAL) {
+func replicateToReplica(replicaAddr string, command string) {
+	conn, err := net.Dial("tcp", replicaAddr)
+	if err != nil {
+		fmt.Println("Replication error:", err)
+		return
+	}
+	defer conn.Close()
+
+	replicationCommand := "REPL " + command + "\n"
+	conn.Write([]byte(replicationCommand))
+}
+
+func handleConnection(conn net.Conn, store *KVStore, wal *WAL, replicaAddr string) {
 	defer conn.Close()
 	scanner := bufio.NewScanner(conn)
 
@@ -29,8 +42,10 @@ func handleConnection(conn net.Conn, store *KVStore, wal *WAL) {
 			}
 
 			wal.Write(line)
-
 			store.Set(parts[1], parts[2])
+
+			go replicateToReplica(replicaAddr, line)
+
 			conn.Write([]byte("OK\n"))
 
 		case "GET":
@@ -52,9 +67,15 @@ func handleConnection(conn net.Conn, store *KVStore, wal *WAL) {
 			}
 
 			wal.Write(line)
-
 			store.Delete(parts[1])
+
+			go replicateToReplica(replicaAddr, line)
+
 			conn.Write([]byte("OK\n"))
+
+		case "REPL":
+			replicatedCommand := strings.Join(parts[1:], " ")
+			ApplyCommand(store, replicatedCommand)
 
 		default:
 			conn.Write([]byte("ERROR: unknown command\n"))
@@ -63,9 +84,18 @@ func handleConnection(conn net.Conn, store *KVStore, wal *WAL) {
 }
 
 func main() {
+	if len(os.Args) < 3 {
+		fmt.Println("Usage: go run . <port> <replicaPort>")
+		return
+	}
+
+	port := os.Args[1]
+	replicaPort := os.Args[2]
+	replicaAddr := "localhost:" + replicaPort
+
 	store := NewKVStore()
 
-	wal, err := NewWAL("wal.log")
+	wal, err := NewWAL("wal_"+port+".log")
 	if err != nil {
 		fmt.Println("WAL error:", err)
 		return
@@ -77,14 +107,14 @@ func main() {
 		return
 	}
 
-	listener, err := net.Listen("tcp", ":8080")
+	listener, err := net.Listen("tcp", ":"+port)
 	if err != nil {
 		fmt.Println("failed to start server:", err)
 		return
 	}
 	defer listener.Close()
 
-	fmt.Println("KV store listening on port 8080")
+	fmt.Println("KV store listening on port", port, "Replica:", replicaPort)
 
 	for {
 		conn, err := listener.Accept()
@@ -93,6 +123,6 @@ func main() {
 			continue
 		}
 
-		go handleConnection(conn, store, wal)
+		go handleConnection(conn, store, wal, replicaAddr)
 	}
 }
