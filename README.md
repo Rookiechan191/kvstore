@@ -1,45 +1,113 @@
 # kvstore
 
-A simple TCP key-value store in Go with:
+A distributed, in-memory key-value store written in Go. Clients talk plain TCP text, writes are durably logged to a WAL before being applied, and a separate router process uses FNV-32a hashing to shard keys across multiple nodes. Each node can asynchronously replicate writes to a single peer.
 
-- In-memory storage (`map[string]string` protected by `sync.RWMutex`)
-- Text protocol over TCP on port `8080`
-- Write-ahead log (WAL) persistence to `wal.log`
-- Recovery on startup by replaying WAL commands
+---
 
-## Requirements
+## Folder structure
 
-- Go version compatible with [go.mod](go.mod)
+```
+kvstore/
+├── benchmark/
+│   └── benchmark.go       # Standalone load tester
+├── router/
+│   ├── hash.go            # FNV-32a hashing + node selection
+│   └── router.go          # Interactive stdin router
+├── server/
+│   ├── command.go         # ApplyCommand: parses SET / DELETE
+│   ├── main.go            # TCP server, connection handler, replication
+│   ├── store.go           # KVStore: RWMutex-protected map
+│   ├── wal.go             # Write-Ahead Log: append, fsync, replay
+│   ├── wal_8080.log       # Generated at runtime
+│   ├── wal_8081.log       # Generated at runtime
+│   └── wal_8082.log       # Generated at runtime
+├── .gitignore
+├── go.mod
+└── README.md
+```
 
-## Run
+Each subdirectory is its own `package main` — they are separate binaries and cannot be compiled together.
 
-Because `benchmark.go` also defines a `main` function, run the server using explicit files:
+---
+
+## How it works
+
+### Server (`server/`)
+
+Accepts TCP connections and handles commands line-by-line using `bufio.Scanner`. Each connection runs in its own goroutine. For every mutating command (`SET` / `DELETE`), the server:
+
+1. Writes the raw command line to the WAL and calls `fsync`
+2. Applies the mutation to the in-memory store
+3. Spawns a goroutine to forward the command to the configured replica
+
+`REPL` commands (incoming replication messages) bypass the WAL entirely — they are applied directly via `ApplyCommand` with no response written back. This prevents replication loops and avoids double-logging.
+
+On startup, the WAL file is seeked to offset 0 and replayed line-by-line to restore state. The file is opened with `O_CREATE|O_APPEND|O_RDWR` — the `O_RDWR` flag is required so the startup seek works; `O_APPEND` alone would be write-only.
+
+### Store (`server/store.go`)
+
+A plain `map[string]string` protected by a `sync.RWMutex`. `Get` takes a read lock; `Set` and `Delete` take a write lock.
+
+### Router (`router/`)
+
+Reads a command from stdin, extracts the key with `fmt.Sscanf`, runs it through FNV-32a (`hash/fnv`), and picks a node via `int(hash) % len(nodes)`. The full raw input line is forwarded over a new TCP connection and the first response line is printed. Nodes are hardcoded as `localhost:8080`, `8081`, `8082`.
+
+### Benchmark (`benchmark/`)
+
+Opens a new TCP connection for each of 10,000 `SET` commands, writes the command, then closes the connection immediately without reading the `OK` response back. The reported RPS measures connection-setup + write latency, not round-trip latency.
+
+---
+
+## Getting started
+
+### Prerequisites
+
+- Go 1.21+
+
+### Run the server
 
 ```bash
-go run main.go store.go wal.go command.go
+cd server
+go run . 8080 8081
 ```
 
-Or build the server binary from those same files:
+Starts a TCP server on `:8080` that replicates writes to `localhost:8081`.
+
+### Run a replica
 
 ```bash
-go build -o kvstore main.go store.go wal.go command.go
+cd server
+go run . 8081 8080
 ```
 
-Server output:
-
-```text
-KV store listening on port 8080
-```
-
-## Protocol
-
-Connect with a TCP client (for example, `nc`):
+### Use the interactive router
 
 ```bash
-nc localhost 8080
+cd router
+go run .
 ```
 
-Supported commands:
+```
+> SET foo bar
+Routing to: localhost:8081
+OK
+> GET foo
+Routing to: localhost:8081
+bar
+```
+
+### Run the benchmark
+
+```bash
+cd benchmark
+go run .
+```
+
+Fires 10,000 `SET key<n> value<n>` commands sequentially against `localhost:8080`.
+
+---
+
+## Commands
 
 | Command | Syntax | Response |
 |---|---|---|
@@ -47,53 +115,32 @@ Supported commands:
 | `GET` | `GET <key>` | `<value>` or `NULL` |
 | `DELETE` | `DELETE <key>` | `OK` |
 
-Error responses:
+All messages are newline-delimited plain text. Values cannot contain spaces — commands are parsed with `strings.Fields`, so `SET key hello world` silently drops `world`.
 
-- `ERROR: SET needs key and value`
-- `ERROR: GET needs a key`
-- `ERROR: DELETE needs a key`
-- `ERROR: unknown command`
+---
 
-Example session:
+## Known issues and limitations
 
-```text
-SET name Alice
-OK
-GET name
-Alice
-DELETE name
-OK
-GET name
-NULL
-```
+**Correctness**
 
-## Persistence (WAL)
+- **`int(hash) % len(nodes)` sign bug** — `hashKey` returns `uint32`. Casting to `int` can go negative on 32-bit systems, causing a runtime panic. Fix: `int(hash % uint32(len(nodes)))`.
+- **No read-your-writes guarantee** — replication is fire-and-forget in a goroutine; a `GET` issued immediately after a `SET` may return a stale value from the replica.
+- **Values cannot contain spaces** — `strings.Fields` splits on all whitespace, so multi-word values are silently truncated.
+- **WAL is never compacted** — the log grows indefinitely. Replay time grows with it; there is no snapshotting or truncation.
+- **No replication acknowledgment** — the primary does not verify that the replica applied the write.
 
-- `SET` and `DELETE` are appended to `wal.log` before being applied in-memory.
-- On startup, `wal.log` is replayed to rebuild in-memory state.
-- `GET` is not logged.
+**Router**
 
-## Benchmark
+- **`GET` may route to the wrong node** — if a key was written via a direct connection (bypassing the router), it may live on a different node than where the router sends the `GET`.
+- **Nodes are hardcoded** — `localhost:8080`, `8081`, `8082` are hardcoded in `router.go`; there is no config file or flag.
 
-`benchmark.go` is a simple load generator that sends `10000` `SET` requests over TCP.
+**Benchmark**
 
-Start server first, then run:
+- **Does not read responses** — the connection closes before the server `OK` arrives, which can produce write errors on the server side.
+- **Sequential, single-threaded** — one connection at a time; does not measure concurrent throughput.
 
-```bash
-go run benchmark.go
-```
+---
 
-## Known Limitations
+## License
 
-- Values are parsed with `strings.Fields`, so spaces are not preserved (only the third token is used as value).
-- No graceful shutdown hook to close WAL explicitly.
-- WAL file grows indefinitely (no compaction/snapshotting).
-- Protocol is line-based and minimal (no auth, no TTL, no transactions).
-
-## Project Files
-
-- `main.go`: TCP server, command dispatch, startup/recovery flow
-- `store.go`: thread-safe in-memory key-value store
-- `wal.go`: WAL append and replay logic
-- `command.go`: WAL command application (`SET`, `DELETE`)
-- `benchmark.go`: standalone benchmark client
+MIT
