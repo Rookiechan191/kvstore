@@ -10,6 +10,6 @@ func hashKey(key string) uint32 {
 
 func getNode(key string, nodes []string) string {
 	hash := hashKey(key)
-	index := int(hash) % len(nodes)
+	index := int(hash % uint32(len(nodes)))
 	return nodes[index]
 }

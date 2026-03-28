@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"fmt"
 	"net"
 	"time"
@@ -20,6 +21,8 @@ func main() {
 
 		command := fmt.Sprintf("SET key%d value%d\n", i, i)
 		conn.Write([]byte(command))
+
+		_, _ = bufio.NewReader(conn).ReadString('\n')
 
 		conn.Close()
 	}

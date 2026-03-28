@@ -42,7 +42,7 @@ func handleConnection(conn net.Conn, store *KVStore, wal *WAL, replicaAddr strin
 			}
 
 			wal.Write(line)
-			store.Set(parts[1], parts[2])
+			store.Set(parts[1], strings.Join(parts[2:], " "))
 
 			go replicateToReplica(replicaAddr, line)
 
