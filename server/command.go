@@ -13,7 +13,7 @@ func ApplyCommand(store *KVStore, line string) {
 	switch cmd {
 	case "SET":
 		if len(parts) >= 3 {
-			store.Set(parts[1], parts[2])
+			store.Set(parts[1], strings.Join(parts[2:], " "))
 		}
 	case "DELETE":
 		if len(parts) >= 2 {
