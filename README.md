@@ -3,6 +3,12 @@
 A distributed, in-memory key-value store written in Go. Clients talk plain TCP text, writes are durably logged to a WAL before being applied, and a separate router process uses FNV-32a hashing to shard keys across multiple nodes. Each node can asynchronously replicate writes to a single peer.
 
 ---
+## Architecture
+
+![System topology](assets/kvstore_topology.svg)
+
+![Write path](assets/kvstore_write_path.svg)
+
 
 ## Folder structure
 
